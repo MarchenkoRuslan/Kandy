@@ -17,13 +17,13 @@ The **gate** between v1 and v2 is not time-based; it is the success-metrics gate
 
 ---
 
-## v1 — MVP (~2 weeks, mock-first)
+## v1: MVP (mock-first, ~2 weeks)
 
 **Goal.** A complete, demonstrable end-to-end research flow on synthetic data, with all interfaces in place so that swapping mocks for real Meta and Anthropic clients in v2 requires no changes outside the adapter modules.
 
 **Non-goal.** Calibrated weights, real API access, multi-user support, hosting, or any production concern.
 
-### Week 1 — backend foundation
+### Week 1: backend foundation
 
 | Day | Deliverable | Traces to |
 |---|---|---|
@@ -34,7 +34,7 @@ The **gate** between v1 and v2 is not time-based; it is the success-metrics gate
 | 4 | `services/discovery/` — `normalizer.py` (URL → eTLD+1 + search terms), `aggregator.py` (signals + confidence formula), `ranker.py` (impressions desc, longevity fallback, top-N). Weights from §6.2 as constants. | §6 |
 | 5 | `services/ai/` — `Protocol AdAnalyzer`; `mock.py` returning fixtures keyed by `ad_archive_id`; `prompts.py` with grounding rules and forbidden-vocabulary list; `analyzer.py` real Anthropic SDK skeleton with one-shot retry. Post-validation regex live in mock as well. | §7 |
 
-### Week 2 — frontend, integration, and tests
+### Week 2: frontend, integration, and tests
 
 | Day | Deliverable | Traces to |
 |---|---|---|
@@ -68,7 +68,7 @@ The "real-API" metrics (cost per run, AI grounding pass rate on live model, time
 
 ---
 
-## v2 — Production hardening (~3–4 weeks)
+## v2: Production hardening (~3-4 weeks)
 
 **Goal.** Replace mocks with real implementations, gain operational visibility, and meet the v2 success-metric targets on real data.
 

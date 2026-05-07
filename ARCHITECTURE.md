@@ -235,7 +235,7 @@ erDiagram
 | `GET` | `/api/research/{id}/events` | SSE stream with progress markers, used by the UI during a long `POST /api/research`. |
 | `GET` | `/api/health` | Liveness. |
 
-**Error contract.** `422` on malformed query (validated by Pydantic), `429` when Meta rate limit is hit and our retry budget is exhausted (with `Retry-After`), `502` on upstream Meta or Anthropic failure, `404` on unknown `research_run.id`, `408` when a research run exceeds `MAX_DURATION_SECONDS`. All errors include a stable `error_code` for the UI to map to localized messages later.
+**Error contract.** `422` on malformed query (validated by Pydantic), `429` when Meta rate limit is hit and our retry budget is exhausted (with `Retry-After` surfaced from the Meta response), `502` on upstream Meta or Anthropic failure, `504` when a research run exceeds `MAX_DURATION_SECONDS` (the orchestrator times out waiting for the pipeline), `404` on unknown `research_run.id`. All errors include a stable `error_code` (e.g. `meta_rate_limited`, `pipeline_timeout`, `ai_invalid_json`) for the UI to map to localized messages later.
 
 **Long-request strategy.** A research run typically takes 15–90 seconds on real Meta data. Two viable shapes:
 
@@ -250,10 +250,17 @@ The SSE approach scales to v2 by replacing the in-process generator with an RQ/C
 
 This is the section the entire product depends on. The thesis is: **competitors rarely run from one page**, so a tool that returns only the seed page reproduces ~10–30% of the truth. The discovery layer expands the seed into the *ecosystem* using independent signals from the data we already pull.
 
+The four ecosystem patterns we explicitly target — taken from the assignment statement — are: **brand-owned pages**, **agency-managed pages**, **persona-style accounts**, and **parallel creative-testing structures** (the same offer rotated across multiple pages to compare performance under different account contexts). They share a structural property exploited below: either a common landing destination or a recurring creative-copy pattern (or both).
+
 ### 6.1 Problem formalization
 
 **Given:** a query — either a brand name string or a product URL.
 **Find:** a set `E = {(page_i, confidence_i)}` of advertiser pages, where `page_i` is judged to belong to the same advertising ecosystem as the query, and `confidence_i ∈ [0, 1]` is the strength of evidence.
+
+**Pre-step: input normalization.** The raw query is canonicalized before any signal extraction:
+- If a URL: parse to eTLD+1 (`https://www.acme-fitness.com/products/30day?utm_source=fb` → `acme-fitness.com`).
+- Tracking parameters (`utm_*`, `gclid`, `fbclid`, `ref`, `_ga`) are **stripped from the canonical form** for the domain signal, but **retained in raw form** for the UTM signal during candidate matching (§6.2). The two views of the same `link_url` are intentional.
+- Search terms are derived from the eTLD+1 stem and any meaningful URL path slug (`/products/30day` → `["30day"]`). For brand-name queries, the string is used as-is.
 
 **Constraints:**
 - We work only with Meta Ad Library data — no scraping, no external enrichment in v1.
@@ -291,28 +298,36 @@ The 0.45 threshold is chosen so that **two strong signals are sufficient** (e.g.
 ### 6.4 Algorithm (pseudocode)
 
 ```python
-def discover(query):
-    seed_pages = meta.search(query)               # cursor-paginated
+def discover(raw_query):
+    query = normalize(raw_query)                   # see §6.1 pre-step
+    seed_pages = meta.search(query.terms)          # cursor-paginated
+
+    # First hop: collect related-candidates from seed pages' ads.
     candidate_pool = set()
-
     for page in seed_pages:
-        ads = meta.fetch_all_ads(page.id)         # cursor-paginated
-        candidate_pool |= extract_related(ads)    # domains, n-grams, UTMs
+        page.ads = meta.fetch_all_ads(page.id)     # cursor-paginated, cache-aware
+        page.confidence = 1.0
+        candidate_pool |= extract_related(page.ads)  # domains, n-grams, UTMs
 
-    expanded = []
+    # Second hop: score candidates against the growing ecosystem.
+    expanded_pages = []                            # plain list of pages, scores attached on the page object
+    seen_ids = {p.id for p in seed_pages}
     for cand in candidate_pool:
-        if cand.id in {p.id for p in seed_pages}:
+        if cand.id in seen_ids:
             continue
-        cand_ads = meta.fetch_all_ads(cand.id)
+        cand.ads = meta.fetch_all_ads(cand.id)
+        reference_pages = seed_pages + expanded_pages
         score = max(
-            confidence(cand_ads, p_ads)
-            for p in seed_pages + expanded
-            for p_ads in [meta.cached_ads(p.id)]
+            confidence(cand.ads, ref.ads)
+            for ref in reference_pages
         )
         if score >= 0.45:
-            expanded.append((cand, score))
+            cand.confidence = score
+            expanded_pages.append(cand)
+            seen_ids.add(cand.id)
 
-    pages = seed_pages + [c for c, _ in expanded]
+    # Rank top creatives per page (impressions desc, longevity fallback).
+    pages = seed_pages + expanded_pages
     for page in pages:
         page.top_ads = rank(
             page.ads,
@@ -323,6 +338,8 @@ def discover(query):
 ```
 
 **Traversal depth is bounded to 2 hops** from the seed pages. Each candidate that crosses the 0.45 threshold could in principle introduce its own related-candidates, but unbounded expansion risks pulling in shared-CDN tangents and exploding the result set. Two hops are sufficient to find brand → agency → persona-grid structures observed in practice; deeper structures are rare and v2 territory if they appear in the ground-truth set.
+
+`meta.fetch_all_ads` is **cache-aware**: a second call for the same `page.id` within a research run is served from an in-memory dict; across runs, the 24-hour SQLite cache (§8) absorbs the load. This is why the algorithm does not pre-fetch all candidate ads in batch — fetches are idempotent and cheap on the second pass.
 
 ### 6.5 Synthetic cases
 
@@ -453,7 +470,14 @@ The grounding pass-rate (first-try success) is one of the success metrics — se
 
 - **Context length.** The per-page prompt with 10–20 creatives and their media descriptions comfortably fits in the 200K window with room for the schema and the forbidden-vocabulary list.
 - **Structured output.** Native JSON tool-use produces valid output without retry loops in our experience.
-- **Cost.** Approximately $3/Mtok input on the standard tier, with batch API discount available in v2. A 50-page research run is roughly 50 per-page prompts × ~3K tokens + 250 per-ad prompts × ~1K tokens ≈ 400K tokens input + ~150K output ≈ $1.50 estimated worst case (per run).
+- **Cost (worked example, public Sonnet 4 pricing of $3/Mtok input, $15/Mtok output).** A 50-page research run with 5 top-ads per page:
+  - **Input:** 50 per-page prompts × ~3K tok + 250 per-ad prompts × ~1K tok ≈ **400K tok**.
+  - **Output:** ~150K tok of structured JSON.
+  - **Standard pricing:** 0.4M × $3 + 0.15M × $15 ≈ **$3.45 per run, worst case**.
+  - **Batch API (50% discount, generally available, scheduled for v2):** ≈ **$1.75 per run**.
+  - **Per-page-only mode** (drop the per-ad prompt; keep only page-level summaries — a degraded but viable mode for cost-sensitive deployments): ≈ **$1.50 standard / $0.75 batch**.
+
+These numbers are consistent with the v2 success-metric target in §12.3 and the development budget in §13.
 
 The choice is reversible — both `OpenAI` and self-hosted alternatives can implement the same `AdAnalyzer` protocol.
 
@@ -535,7 +559,7 @@ Three screens, designed for **read speed over visual complexity**.
 │  .com; CTA "Try the 30-day program — free first week" appears│
 │  in 7/8 active ads (refs ad_id 22..., 24..., 27...).         │
 │                                                              │
-│  Creative angles                                              │
+│  Creative angles                                             │
 │  · Personal-journey hook (ads 22, 24, 27)                    │
 │  · Mornings / habit framing (ads 25, 28)                     │
 ├──────────────────────────────────────────────────────────────┤
@@ -575,6 +599,57 @@ flowchart TD
 - **AI inline.** Analysis sits under the creative it analyzes, not in a separate tab.
 - **Confidence visible.** Every non-seed page shows its confidence as a numeric badge plus a `[strong]` label when ≥ 0.70.
 - **Coverage warnings honest.** When Meta returned partial data for an ad, the card shows a small `[partial]` chip rather than hiding the gap.
+
+### 9.6 Markdown export — sample structure
+
+The export is a deterministic function of `ResearchRun.payload` (§4 invariant). Below is the v1 template — the exporter is a single Jinja-like template, not a code-generation pipeline.
+
+````markdown
+# Research: acme-fitness.com
+*Generated 2026-03-12T14:30:00Z · run_id `rsr_8K3p9` · 5 pages · 47 ads*
+
+## Summary
+- **5 advertiser pages discovered** — 1 seed, 4 expanded.
+- **31 active ads, 16 inactive** across the ecosystem.
+- **Dominant landing domain:** `acme-fitness.com` (5/5 pages).
+- **Recurring CTA pattern:** *"Try the 30-day program — free first week"* (appears on 4/5 pages).
+- **Coverage notes:** 3 ads marked `[partial]` (missing impressions data).
+
+## 1. Acme Fitness — seed
+*12 ads · 8 active · 4 inactive · campaigns 2025-10-01 → 2026-03-12*
+
+**Page-level analysis.**
+*The page consistently positions Acme as a beginner-friendly 30-day program (refs ad_id 12, 14, 17). Creative angles: outcome-first hooks (12, 14), routine framing (15, 17). Positioning patterns: "free first week" trial offer is the dominant CTA across 9/12 ads.*
+
+**Top creatives.**
+
+| # | Headline | CTA | Active | Imp. range |
+|---|---|---|---|---|
+| 1 | "Lose 10 lbs in 30 days, no diet changes" | Try free week | 64 days | 50K–100K |
+| 2 | "Why mornings beat evenings for fat loss" | Start free trial | 47 days | 30K–50K |
+| ... | | | | |
+
+### Ad #1 — AI analysis
+- **Hook:** *"Lose 10 lbs in 30 days, no diet changes"* — concrete number + concrete constraint.
+- **Offer clarity:** 4/5 — *"free first week"* is a specific commitment.
+- **CTA fit:** aligned — body promises a try, CTA delivers.
+- **Why performing:** 64-day longevity at 50K–100K imp range survived spend allocation.
+
+## 2. Acme Promo Hub — confidence 0.78 [strong]
+*9 ads · 6 active · 3 inactive · agency-managed pattern*
+... (same shape) ...
+
+## 3. Persona network
+- **Sarah's Fitness Tips** — confidence 0.86 [strong] · 8 ads
+- **Mike Trains Hard** — confidence 0.82 [strong] · 10 ads
+- **Olivia's Workout Diary** — confidence 0.79 [strong] · 8 ads
+... (each gets its own subsection of the same shape) ...
+
+---
+*Generated by Meta Ad Library Intelligence Tool · grounding-validated AI summaries · weights as of v1 (expert priors, not learned)*
+````
+
+The footer line (provenance + grounding flag + weight version) is **non-negotiable** — it tells a downstream reader of the report what the AI claims rest on, and which version of the confidence weights were used to discover the ecosystem. When v2 ships calibrated weights, the line changes to reflect the new version, and old reports remain readable on their own terms.
 
 ---
 
@@ -630,8 +705,10 @@ To prevent the system from being judged on "looks good," the following are the m
 - **Time-to-result, P95**, on 50 advertiser pages.
   - **v1 on mocks:** < 1 s.
   - **v2 on real APIs:** < 2 minutes.
-- **AI cost per research run.**
-  - **Target:** ≤ $0.80 for a 50-page run with 5 top-ads each (per-page + per-ad combined).
+- **AI cost per research run** (50 pages × 5 top-ads each, per-page + per-ad combined; see §7.5 worked example).
+  - **v1 (mocks):** $0 — no live API calls.
+  - **v2 standard pricing:** ≤ **$3.50 per run** (matches §7.5 worst case).
+  - **v2 with batch API:** ≤ **$1.75 per run** (target — this is what we steer the dashboard cost panel against).
 
 ### 12.4 Adoption (v2 only)
 
@@ -645,7 +722,7 @@ To prevent the system from being judged on "looks good," the following are the m
 Implementation cannot start without, or has reduced quality without, the following:
 
 - **Meta Ad Library API access.** Either a developer token with `ads_archive` permission, or explicit agreement to work only against the public `searchTerms` GET endpoint. The choice affects how rich the seed page extraction can be in §6.4.
-- **Anthropic API key with budget.** Approximately 200 research runs at ~$0.50 each ≈ $100 for v1 development and grounding-rule debugging.
+- **Anthropic API key.** Strictly speaking optional for v1 (mocks return canned responses), but recommended for prompt prototyping during week 1, day 5. Budget ~$50 covers ~25 development runs at standard pricing. The full $200 budget for ground-truth iteration belongs to [v2 gates](./ROADMAP.md#gates-to-enter-v2), not v1.
 - **Ground-truth labelled set.** 5–10 cases of *brand → known related advertiser pages*. Without this, ecosystem-recall (§12.1) cannot be honestly evaluated. Source: manual labelling from public Ad Library pages plus industry knowledge.
 - **Design intent confirmation.** Sign-off that three screens (Search / Dashboard / Advertiser Detail) are the right shape and Markdown export is sufficient (no PDF/Slides required).
 - **Local development environment only.** No hosting needed for v1 — `uvicorn` + `npm run dev`.

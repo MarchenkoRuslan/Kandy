@@ -29,7 +29,7 @@ The technical assignment looks like an API integration task. It is not. Three th
 |---|---|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | The complete technical design: stack, data model, API surface, the deep Discovery section (signals, weights, pseudocode, 5 cases), AI grounding, resilience, success metrics, assumptions. |
 | [ROADMAP.md](./ROADMAP.md) | Two-phase development plan: v1 MVP (~2 weeks, day-by-day) and v2 production hardening (~3–4 weeks) with explicit gates and off-scope. |
-| [PITCH.md](./PITCH.md) | Outline for the 10–15 minute oral defense: 8–9 slides, speaker notes, FAQ for likely interviewer questions. |
+| [PITCH.md](./PITCH.md) | Outline for the 10–15 minute oral defense: 9 slides, speaker notes, FAQ for likely interviewer questions. |
 
 ## How to read (10–15 minutes)
 
