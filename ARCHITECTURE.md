@@ -1,6 +1,6 @@
 # ARCHITECTURE.md
 
-System design for the Meta Ad Library Intelligence Tool. Written as the primary technical artifact of the test-assignment proposal — code is intentionally not part of this iteration.
+System design for the Meta Ad Library Intelligence Tool. This is the primary technical artifact of the proposal; implementation code is intentionally out of scope for this iteration.
 
 ## Table of contents
 
@@ -9,12 +9,12 @@ System design for the Meta Ad Library Intelligence Tool. Written as the primary 
 3. [Stack and rationale](#3-stack-and-rationale)
 4. [Data model](#4-data-model)
 5. [API surface](#5-api-surface)
-6. [Discovery — the core differentiator](#6-discovery--the-core-differentiator)
+6. [Discovery — core differentiator](#6-discovery--core-differentiator)
 7. [AI layer](#7-ai-layer)
 8. [Meta API resilience](#8-meta-api-resilience)
 9. [UI / UX](#9-ui--ux)
-10. [Risks and mitigations](#10-risks-and-mitigations)
-11. [Open questions](#11-open-questions)
+10. [Delivery controls](#10-delivery-controls)
+11. [Kickoff alignment decisions](#11-kickoff-alignment-decisions)
 12. [Success metrics](#12-success-metrics)
 13. [Required inputs to start v1](#13-required-inputs-to-start-v1)
 14. [Assumptions](#14-assumptions)
@@ -32,6 +32,7 @@ flowchart LR
 ```
 
 **Actors and dependencies.**
+
 - **Researcher** — single user role in v1. Submits a brand name or product URL, reviews the reconstructed ecosystem, exports a Markdown report.
 - **Meta Ad Library API** — primary data source. Public-but-rate-limited, returns ads, page metadata, partial impression ranges.
 - **Anthropic Claude API** — analysis layer for per-ad and per-page reasoning under grounding constraints.
@@ -62,7 +63,7 @@ flowchart LR
     UI -->|"GET /api/research/{id}/export.md"| Export[Markdown Exporter]
 ```
 
-**Three containers** in v1:
+**v1 container model:**
 
 - **React + Vite SPA** — single-page application, served as static files in production.
 - **FastAPI service** — async orchestrator, hosts all domain logic (normalizer, discovery, ranker, AI orchestration, export).
@@ -70,7 +71,7 @@ flowchart LR
 
 External clients (Meta, Anthropic) are accessed exclusively through `Protocol`-typed interfaces, with mock implementations selected by `USE_MOCKS=true` for development and demos.
 
-### Sequence: a full research request
+### Sequence: one full research run
 
 ```mermaid
 sequenceDiagram
@@ -112,43 +113,48 @@ Long-running calls (full pagination, AI analysis) are streamed back via Server-S
 
 ### Backend: FastAPI (Python 3.11+)
 
-| Alternative | Why rejected |
-|---|---|
-| Node/Express | Pydantic gives a stricter typed contract than ad-hoc Zod schemas; auto-generated OpenAPI is a freebie that drives frontend types. |
-| Django | Heavy for a service that has one resource (`ResearchRun`) and no built-in auth/admin needs. |
-| Flask | No first-class async; we need async for paginated fan-out to Meta. |
+**Selected solution.** FastAPI is the backend runtime for v1 and v2.
 
-**Decisive properties:** native `async`/`await` for paginated and parallel HTTP fan-out, Pydantic for the contract that both the AI structured-output layer and the React frontend consume, OpenAPI generation for `openapi-typescript`-driven TS types.
+**Why this solution fits the system:**
+
+- Native `async`/`await` handles paginated fan-out to Meta endpoints without blocking worker threads.
+- Pydantic provides a strict API contract shared by backend orchestration, AI structured output, and frontend type generation.
+- Auto-generated OpenAPI keeps backend and frontend schemas aligned and reduces contract drift.
+- The codebase shape stays minimal for a single-domain service centered on `ResearchRun`.
 
 ### Frontend: React + Vite + TypeScript + Tailwind
 
-| Alternative | Why rejected |
-|---|---|
-| Next.js (App Router) | SSR/RSC is unnecessary for an internal research dashboard. Adds dev-loop overhead and routing decisions we don't need. |
-| Plain Vite + JS | Types are non-negotiable when the contract is generated from Pydantic. |
-| Remix / TanStack Start | Same overhead as Next.js, no compensating benefit. |
+**Selected solution.** React + Vite + TypeScript + Tailwind powers the research dashboard.
 
-**Decisive properties:** fast dev-loop on Vite, no SSR needed, Tailwind + shadcn/ui for clean cards without designing a system from scratch, React Query for server-cache semantics around `ResearchRun`.
+**Why this solution fits the system:**
+
+- Vite gives a fast feedback loop for a UI that is interaction-heavy and does not require SSR.
+- TypeScript keeps the UI aligned with the generated API contract and lowers integration errors.
+- Tailwind enables fast delivery of dense, readable analysis screens without building a custom design system.
+- React Query handles server-state workflows around long-running `ResearchRun` requests and reload-safe caching.
 
 ### Persistence: SQLite
 
-| Alternative | Why rejected |
-|---|---|
-| PostgreSQL | Zero-ops gain matters more than concurrency in v1. Adds a service to run, a connection pool to tune, migrations to author. Migration to Postgres is in v2 (see [ROADMAP.md](./ROADMAP.md)). |
-| Redis-only | We need durable snapshots for deterministic export. |
-| In-memory | Loses research runs on restart, breaks export reproducibility. |
+**Selected solution.** SQLite stores `ResearchRun` snapshots in v1.
 
-**Boundary of fitness.** SQLite is fine while: concurrent writers ≤ 1, total DB size < 5 GB, queries are point-lookups by `research_run.id`. The day any of those breaks, we move to Postgres — explicit gate in v2.
+**Why this solution fits the system:**
+
+- Zero-ops local setup supports prototype speed and predictable demos.
+- Single-file persistence guarantees deterministic report export from stored payload snapshots.
+- Read/write profile in v1 is simple and bounded, so SQLite performance is sufficient.
+
+**Boundary of fitness.** SQLite is appropriate while concurrent writers remain low and the dataset stays operationally small. Migration to PostgreSQL is defined as a v2 gate in [ROADMAP.md](./ROADMAP.md).
 
 ### AI: Anthropic Claude Sonnet 4
 
-| Alternative | Why rejected |
-|---|---|
-| GPT-4o | Sonnet 4 has a longer context for page-level prompts (10–20 creatives + descriptions) and stronger structured-output adherence in our internal experience; price is comparable. |
-| Local model (Llama, Mixtral) | Quality on grounded reasoning over short ad copy is below frontier models; ops cost (GPU) inappropriate for a prototype. |
-| Claude Haiku | Cheaper but weaker on the multi-creative page-level prompt; we'd lose the cross-creative pattern detection that justifies the AI layer. |
+**Selected solution.** Anthropic Claude Sonnet 4 is the analysis model.
 
-**Decisive properties:** 200K context comfortably fits 10–20 creatives in the per-page prompt, native JSON tool-use produces valid structured output without retry loops, batch API support for cost reduction in v2.
+**Why this solution fits the system:**
+
+- 200K context is sufficient for page-level analysis over multiple creatives with evidence traces.
+- Structured JSON output is reliable for schema-constrained per-ad and per-page responses.
+- The model quality is strong on grounded reasoning tasks where claims must be tied to explicit ad evidence.
+- Batch API availability supports cost optimization once v2 moves to real traffic.
 
 ### Cross-cutting principles
 
@@ -216,6 +222,7 @@ erDiagram
 ```
 
 **Key invariants.**
+
 - `Ad.impressions_upper >= Ad.impressions_lower` whenever both are present.
 - `Ad.is_active ⟺ Ad.ended_at IS NULL`.
 - `AdvertiserPage.confidence ∈ [0, 1]`. Seed pages have `confidence = 1.0`.
@@ -227,13 +234,13 @@ erDiagram
 
 ## 5. API surface
 
-| Method | Path | Purpose |
+|Method|Path|Purpose|
 |---|---|---|
-| `POST` | `/api/research` | Run a new investigation. Body: `{query: str, type: "brand"\|"url", filters?: {...}}`. Returns `ResearchRun`. |
-| `GET` | `/api/research/{id}` | Re-open a stored run from SQLite. |
-| `GET` | `/api/research/{id}/export.md` | Deterministic Markdown report. `Content-Type: text/markdown; charset=utf-8`. |
-| `GET` | `/api/research/{id}/events` | SSE stream with progress markers, used by the UI during a long `POST /api/research`. |
-| `GET` | `/api/health` | Liveness. |
+|`POST`|`/api/research`|Run a new investigation. Body: `{query: str, type: "brand" or "url", filters?: {...}}`. Returns `ResearchRun`.|
+|`GET`|`/api/research/{id}`|Re-open a stored run from SQLite.|
+|`GET`|`/api/research/{id}/export.md`|Deterministic Markdown report. `Content-Type: text/markdown; charset=utf-8`.|
+|`GET`|`/api/research/{id}/events`|SSE stream with progress markers, used by the UI during a long `POST /api/research`.|
+|`GET`|`/api/health`|Liveness.|
 
 **Error contract.** `422` on malformed query (validated by Pydantic), `429` when Meta rate limit is hit and our retry budget is exhausted (with `Retry-After` surfaced from the Meta response), `502` on upstream Meta or Anthropic failure, `504` when a research run exceeds `MAX_DURATION_SECONDS` (the orchestrator times out waiting for the pipeline), `404` on unknown `research_run.id`. All errors include a stable `error_code` (e.g. `meta_rate_limited`, `pipeline_timeout`, `ai_invalid_json`) for the UI to map to localized messages later.
 
@@ -246,23 +253,25 @@ The SSE approach scales to v2 by replacing the in-process generator with an RQ/C
 
 ---
 
-## 6. Discovery — the core differentiator
+## 6. Discovery — core differentiator
 
-This is the section the entire product depends on. The thesis is: **competitors rarely run from one page**, so a tool that returns only the seed page reproduces ~10–30% of the truth. The discovery layer expands the seed into the *ecosystem* using independent signals from the data we already pull.
+This section is the product's core value. Competitors rarely advertise from a single page, so a tool that returns only the seed page captures only part of the real structure. The discovery layer expands seed results into a full ecosystem by combining independent, auditable signals.
 
 The four ecosystem patterns we explicitly target — taken from the assignment statement — are: **brand-owned pages**, **agency-managed pages**, **persona-style accounts**, and **parallel creative-testing structures** (the same offer rotated across multiple pages to compare performance under different account contexts). They share a structural property exploited below: either a common landing destination or a recurring creative-copy pattern (or both).
 
-### 6.1 Problem formalization
+### 6.1 Problem definition
 
 **Given:** a query — either a brand name string or a product URL.
 **Find:** a set `E = {(page_i, confidence_i)}` of advertiser pages, where `page_i` is judged to belong to the same advertising ecosystem as the query, and `confidence_i ∈ [0, 1]` is the strength of evidence.
 
 **Pre-step: input normalization.** The raw query is canonicalized before any signal extraction:
+
 - If a URL: parse to eTLD+1 (`https://www.acme-fitness.com/products/30day?utm_source=fb` → `acme-fitness.com`).
 - Tracking parameters (`utm_*`, `gclid`, `fbclid`, `ref`, `_ga`) are **stripped from the canonical form** for the domain signal, but **retained in raw form** for the UTM signal during candidate matching (§6.2). The two views of the same `link_url` are intentional.
 - Search terms are derived from the eTLD+1 stem and any meaningful URL path slug (`/products/30day` → `["30day"]`). For brand-name queries, the string is used as-is.
 
 **Constraints:**
+
 - We work only with Meta Ad Library data — no scraping, no external enrichment in v1.
 - The graph is computed at *query time* on the result set; we do not maintain a global graph between queries.
 - Traversal depth is bounded (see §6.4) to keep run times predictable.
@@ -271,13 +280,13 @@ The four ecosystem patterns we explicitly target — taken from the assignment s
 
 Each signal is computed pairwise between two pages `a` and `b` over their respective ad sets, normalized to `[0, 1]`, and combined linearly with the weights below.
 
-| Signal | Weight `w_i` | Source | Noise mitigation |
+|Signal|Weight `w_i`|Source|Noise mitigation|
 |---|---:|---|---|
-| Shared `landing_domain` (eTLD+1) | **0.40** | `Ad.link_url` parsed to eTLD+1 | Excluded CDN list (cdn.shopify.com, fbcdn, cloudfront, etc.); known affiliate-network domains down-weighted. |
-| n-gram overlap of headlines and body openings (k≥3, Jaccard ≥ 0.3) | **0.25** | `Ad.headline`, first sentence of `Ad.body` | Stop-list of generic ad phrases ("buy now," "limited time," "free shipping," "click here") removed before n-gram extraction. |
-| Shared CTA + value-prop pattern (normalized) | **0.15** | `Ad.cta_text` + first line of `Ad.body` | Standard CTAs ("Shop Now," "Learn More") contribute 0; only non-trivial CTAs count. |
-| Active-period overlap of ad campaigns | **0.10** | `started_at`, `ended_at` | Low weight — supportive signal, not decisive on its own. |
-| Shared UTM `utm_source` / `utm_campaign` (non-trivial) | **0.10** | parsed query string of `link_url` | If absent, signal contributes 0 (not a penalty). |
+|Shared `landing_domain` (eTLD+1)|**0.40**|`Ad.link_url` parsed to eTLD+1|Excluded CDN list (cdn.shopify.com, fbcdn, cloudfront, etc.); known affiliate-network domains down-weighted.|
+|n-gram overlap of headlines and body openings (k≥3, Jaccard ≥ 0.3)|**0.25**|`Ad.headline`, first sentence of `Ad.body`|Stop-list of generic ad phrases ("buy now," "limited time," "free shipping," "click here") removed before n-gram extraction.|
+|Shared CTA + value-prop pattern (normalized)|**0.15**|`Ad.cta_text` + first line of `Ad.body`|Standard CTAs ("Shop Now," "Learn More") contribute 0; only non-trivial CTAs count.|
+|Active-period overlap of ad campaigns|**0.10**|`started_at`, `ended_at`|Low weight — supportive signal, not decisive on its own.|
+|Shared UTM `utm_source` / `utm_campaign` (non-trivial)|**0.10**|parsed query string of `link_url`|If absent, signal contributes 0 (not a penalty).|
 
 Weights are **expert priors**, not learned. The dominance of the domain signal (0.40) reflects an empirical observation that a shared landing domain is the strongest single indicator of co-ownership; n-gram overlap is the next-most-reliable signal because reusing creative copy is cheap and operationally common across pages an advertiser controls.
 
@@ -285,7 +294,7 @@ The structured calibration of these weights against ground truth is an explicit 
 
 ### 6.3 Confidence scoring
 
-```
+```text
 confidence(a, b) = Σ_i w_i · s_i(a, b)
 where s_i ∈ [0, 1] is the normalized strength of signal i.
 
@@ -295,7 +304,7 @@ Strong-link threshold:   confidence ≥ 0.70  →  highlighted in UI as "strong"
 
 The 0.45 threshold is chosen so that **two strong signals are sufficient** (e.g., shared domain at 0.40 + a small n-gram contribution of 0.10 puts a pair at exactly 0.50), while **a single supporting signal is not** (e.g., UTM-only at 0.10 falls well below). This is a deliberate bias toward precision over recall; see §6.5 case 5.
 
-### 6.4 Algorithm (pseudocode)
+### 6.4 Discovery algorithm (pseudocode)
 
 ```python
 def discover(raw_query):
@@ -343,10 +352,11 @@ def discover(raw_query):
 
 ### 6.5 Synthetic cases
 
-These five cases are designed to be the calibration set for v1 fixtures. Each case exercises a specific signal combination and validates a specific algorithmic property.
+These five cases are the v1 fixture calibration set. Each case stresses a different signal combination and validates a distinct behavior of the discovery logic.
 
 **Case 1 — Brand + single agency. (Baseline scenario.)**
 Seed `Acme Fitness` matches one page. That page's ads link to `acme-fitness.com`. A separate page `Acme Promo Hub` runs ads to the same domain.
+
 - domain: 1.0 (×0.40 = 0.40)
 - n-gram: ~0.4 (×0.25 = 0.10)
 - CTA: ~0.5 (×0.15 = 0.075)
@@ -356,6 +366,7 @@ Seed `Acme Fitness` matches one page. That page's ads link to `acme-fitness.com`
 
 **Case 2 — Persona network. (The case the product is built for.)**
 Seed `Acme Fitness` matches one page. Four additional pages — `Sarah's Fitness Tips`, `Mike Trains Hard`, `Olivia's Workout Diary`, `Coach Ben's Tips` — never mention "Acme" by name. They all link to `acme-fitness.com` and share an identical CTA-value-prop block ("Try the 30-day program — free first week").
+
 - domain: 1.0 (×0.40 = 0.40)
 - n-gram: ~0.7 on the CTA block (×0.25 = 0.175)
 - CTA: 1.0 on the normalized pattern (×0.15 = 0.15)
@@ -365,12 +376,14 @@ Seed `Acme Fitness` matches one page. Four additional pages — `Sarah's Fitness
 
 **Case 3 — White-label media via Shopify CDN. (Stop-list validation.)**
 Two unrelated brands, `Brand-A` and `Brand-Z`, both serve images from `cdn.shopify.com`. Without filtering, the domain extraction step would treat the CDN as a shared landing domain.
+
 - The CDN stop-list excludes `cdn.shopify.com` from the domain signal (it's a media host, not a landing destination).
 - n-gram, CTA, period, UTM signals all near 0.
 - **confidence ≈ 0.0 → no link.** Demonstrates the stop-list works.
 
 **Case 4 — Language splits. (Robustness to internationalization.)**
 A single brand operates two pages: `Acme Fitness EN` and `Acme Fitness ES`. Creative bodies are in English and Spanish respectively, so n-gram overlap is near zero. They share the landing domain and one UTM campaign.
+
 - domain: 1.0 (0.40)
 - n-gram: ~0.05 (0.0125)
 - CTA: ~0.0 (0.0) — different languages
@@ -380,6 +393,7 @@ A single brand operates two pages: `Acme Fitness EN` and `Acme Fitness ES`. Crea
 
 **Case 5 — Shared affiliate program. (False-positive rejection.)**
 Two unrelated direct-to-consumer brands, `Brand-Q` and `Brand-W`, both run through an affiliate network `aff-net.com` and include `?ref=aff-net` in some ads. They share no domain, no creative copy, no CTA pattern.
+
 - domain: 0.0 (different)
 - n-gram: 0.0
 - CTA: 0.0
@@ -405,11 +419,12 @@ Two unrelated direct-to-consumer brands, `Brand-Q` and `Brand-W`, both run throu
 
 ## 7. AI layer
 
-Two prompts, both producing structured JSON via the model's tool-use feature.
+Two prompts drive analysis, both returning structured JSON through tool-use.
 
 ### 7.1 Per-ad prompt
 
 **Input fields** passed into the prompt:
+
 - `creative_body`, `headline`, `cta_text`
 - `landing_domain`
 - `impressions_upper`, `running_days`, `is_active`
@@ -485,7 +500,7 @@ The choice is reversible — both `OpenAI` and self-hosted alternatives can impl
 
 ## 8. Meta API resilience
 
-The Meta Ad Library API is functional but constrained. Resilience properties baked into the `MetaClient`:
+The Meta Ad Library API is usable but constrained. The `MetaClient` includes the following resilience controls:
 
 - **Cursor pagination loop.** Every list endpoint is exhausted to the empty `paging.next`. No "first 25 results" assumption anywhere upstream.
 - **Exponential backoff with jitter** on `429` and `5xx`, using `tenacity` with `wait_random_exponential(min=1, max=60)` and a hard ceiling of 5 retries per request. Past that, the error is propagated up and the run continues without that fragment of data.
@@ -501,7 +516,7 @@ Three screens, designed for **read speed over visual complexity**.
 
 ### 9.1 Screen: Search (`/`)
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │   Meta Ad Library Intelligence                          [?]  │
 ├──────────────────────────────────────────────────────────────┤
@@ -523,7 +538,7 @@ Three screens, designed for **read speed over visual complexity**.
 
 ### 9.2 Screen: Research Dashboard (`/research/{id}`)
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  acme-fitness.com   ·   discovered Mar 12, 2026   [Export ↓] │
 ├──────────────────────────────────────────────────────────────┤
@@ -550,7 +565,7 @@ Three screens, designed for **read speed over visual complexity**.
 
 ### 9.3 Screen: Advertiser detail (expanded card)
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  ▼ Sarah's Fitness Tips           confidence 0.86  [strong]  │
 ├──────────────────────────────────────────────────────────────┤
@@ -653,29 +668,29 @@ The footer line (provenance + grounding flag + weight version) is **non-negotiab
 
 ---
 
-## 10. Risks and mitigations
+## 10. Delivery controls
 
-| Risk | Mitigation |
+|Delivery condition|Control built into the design|
 |---|---|
-| Meta returns incomplete data (impressions, link_url, body) | Pydantic `Optional` + aggregator tolerance + UI `[partial]` badge so the user knows. |
-| AI hallucinates marketing prose | Grounding rules in prompt + regex post-validation + one-shot retry + `[weak]` flag in UI on second failure. |
-| False ecosystem links via shared CDN | CDN stop-list, conservative 0.45 threshold, single-signal floor (UTM-only at 0.10 cannot cross). |
-| Meta rate-limit hits during a run | Exponential backoff + session limits + 24-hour cache + informative error to user with `Retry-After` surfaced. |
-| AI cost runs away | Per-page prompt is more compact than 5×per-ad; batch API in v2; hard cap on creatives analyzed per run (top 5 per page only). |
-| Real Meta endpoints differ from spec at integration time | Mock-first decouples discovery + AI + UI development from the integration; the real adapter is a single isolated module. |
-| Confidence weights miscalibrated | v2 ground-truth set + diagnostic distribution view; in v1, the conservative threshold biases toward precision over recall. |
+|Partial Meta fields (`impressions`, `link_url`, `body`)|Pydantic `Optional` fields, tolerant aggregators, and visible `[partial]` badges in the UI/export.|
+|Generic or weak AI output|Grounding constraints in prompts, regex post-validation, one retry, and explicit `quality: "weak"` marking if still non-compliant.|
+|Noisy page-link signals (shared CDN, affiliate overlap)|CDN stop-list, weighted multi-signal scoring, and thresholding (`0.45` membership, `0.70` strong-link).|
+|Meta rate-limit pressure|Exponential backoff with jitter, bounded session limits, and 24-hour cache keys by page/day.|
+|AI spend variability|Top-N cap (5 creatives per page), per-page prompt mode, and batch API path in v2 for lower unit cost.|
+|Adapter drift during real integration|Mock-first boundary with isolated real adapters (`MetaClient`, `AdAnalyzer`) so core logic remains stable.|
+|Weight quality over time|Ground-truth calibration in v2 with distribution diagnostics; weights are versioned in exported reports.|
 
 ---
 
-## 11. Open questions
+## 11. Kickoff alignment decisions
 
-To be answered in the kick-off conversation if v1 is greenlit:
+These decisions align scope, operations, and rollout before v1 starts:
 
-- **Volume.** How many research runs per day or week is the target? Affects cache sizing and Meta rate-limit strategy.
-- **Multi-user.** Is multi-user access required in v1, or only in v2? Affects whether SQLite is sufficient and whether a basic auth layer is in v1 scope.
-- **Hosting.** Cloud or on-premise? On-premise is technically feasible (FastAPI + Postgres + a self-hosted model) but is currently off-scope.
-- **Export integrations.** Is Markdown export sufficient, or are Notion/Slack/Slides expected? Currently Markdown-only by design.
-- **Languages.** v1 assumes English-language creatives. Non-English support needs explicit scoping (tokenizer, stop-list).
+- **Expected run volume.** Defines cache sizing, timeout budgets, and Meta token strategy.
+- **Single-user vs multi-user in v1.** Determines whether SQLite remains sufficient and whether basic auth is pulled forward.
+- **Hosting model.** Cloud is the baseline for v1/v2; on-prem requires explicit scope change.
+- **Export surface.** Markdown is default; additional integrations (Notion/Slack/Slides) are separate workstreams.
+- **Language coverage.** v1 assumes English creatives; multi-language support requires explicit tokenizer/stop-list extension.
 
 ---
 
@@ -719,7 +734,7 @@ To prevent the system from being judged on "looks good," the following are the m
 
 ## 13. Required inputs to start v1
 
-Implementation cannot start without, or has reduced quality without, the following:
+Inputs required to start v1 with predictable output quality:
 
 - **Meta Ad Library API access.** Either a developer token with `ads_archive` permission, or explicit agreement to work only against the public `searchTerms` GET endpoint. The choice affects how rich the seed page extraction can be in §6.4.
 - **Anthropic API key.** Strictly speaking optional for v1 (mocks return canned responses), but recommended for prompt prototyping during week 1, day 5. Budget ~$50 covers ~25 development runs at standard pricing. The full $200 budget for ground-truth iteration belongs to [v2 gates](./ROADMAP.md#gates-to-enter-v2), not v1.
@@ -733,14 +748,14 @@ Implementation cannot start without, or has reduced quality without, the followi
 
 The design depends on the following. Each is paired with the action we take if the assumption breaks.
 
-| # | Assumption | Action if it breaks |
+|#|Assumption|Action if it breaks|
 |---|---|---|
-| **A1** | Meta Ad Library API remains public with rate limits in the order of ~200 req/h per token. | Pull queue + token rotation forward into v1 instead of v2; reduce `MAX_PAGES_PER_RUN`. |
-| **A2** | `link_url` is populated for at least 60% of ads. | Domain signal weight is reduced; n-gram and CTA signals are renormalized to compensate. |
-| **A3** | Meta returns `impressions_lower/upper` for active ads at least. | Ranking falls back to longevity-only. The product still functions, but with reduced precision. |
-| **A4** | Anthropic Sonnet 4 pricing stays within ±20% over the 2 v1 weeks. | Switch to batch API or drop the per-ad prompt and rely on per-page only. |
-| **A5** | Target investigations are in English, or use English CTAs. | n-gram weight reduced for non-English; language-aware tokenizer is a v2 task. |
-| **A6** | Meta Ad Library coverage is adequate for the country of investigation. | UI surface a `coverage limited` warning when seed page count is < 1; user can re-scope. |
+|**A1**|Meta Ad Library API remains public with rate limits in the order of ~200 req/h per token.|Pull queue + token rotation forward into v1 instead of v2; reduce `MAX_PAGES_PER_RUN`.|
+|**A2**|`link_url` is populated for at least 60% of ads.|Domain signal weight is reduced; n-gram and CTA signals are renormalized to compensate.|
+|**A3**|Meta returns `impressions_lower/upper` for active ads at least.|Ranking falls back to longevity-only. The product still functions, but with reduced precision.|
+|**A4**|Anthropic Sonnet 4 pricing stays within ±20% over the 2 v1 weeks.|Switch to batch API or drop the per-ad prompt and rely on per-page only.|
+|**A5**|Target investigations are in English, or use English CTAs.|n-gram weight reduced for non-English; language-aware tokenizer is a v2 task.|
+|**A6**|Meta Ad Library coverage is adequate for the country of investigation.|UI surface a `coverage limited` warning when seed page count is < 1; user can re-scope.|
 
 ---
 
