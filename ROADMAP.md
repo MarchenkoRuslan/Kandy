@@ -101,7 +101,7 @@ These must be true before v2 begins:
 - [ ] **False-link rate ≤ 10%** on the same set.
 - [ ] **Grounding pass rate ≥ 95%** after one-shot retry on a representative AI batch (at least 200 ads).
 - [ ] **Time-to-result P95 < 2 min** on real Meta data, 50 advertiser pages, with the cache empty.
-- [ ] **AI cost ≤ $0.80** per 50-page research run.
+- [ ] **AI cost ≤ $3.50** per 50-page research run on standard pricing, or **≤ $1.75** with batch API enabled.
 - [ ] **Graceful degradation under Meta rate limit** verified by chaos test (force `429` responses) — system completes the run with `[partial]` flags rather than failing.
 
 ---
@@ -132,4 +132,4 @@ To stay within the engineering-honesty principles of this proposal:
 
 ---
 
-For the narrative shape of the oral defense, see [PITCH.md](./PITCH.md).
+This roadmap is self-contained and aligned with the metrics and assumptions in [ARCHITECTURE.md](./ARCHITECTURE.md).

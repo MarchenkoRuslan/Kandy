@@ -1,5 +1,171 @@
 # PITCH.md
 
+Private speaking notes for the 10–15 minute oral defense.
+This file is intentionally local-only and is ignored by git via `.gitignore`.
+
+## Audience
+
+- Technical interviewer reviewing a take-home architecture assignment.
+- Goal: show engineering judgment, not marketing polish.
+
+## Talk structure (13 minutes + 2 minutes Q&A buffer)
+
+| Time | Topic |
+|---|---|
+| 0:00–0:30 | Hook |
+| 0:30–2:00 | Problem framing |
+| 2:00–3:30 | Solution shape |
+| 3:30–6:00 | Concept walkthrough |
+| 6:00–8:00 | Architecture and trade-offs |
+| 8:00–10:00 | Discovery deep-dive |
+| 10:00–11:30 | AI grounding |
+| 11:30–12:30 | Roadmap and gates |
+| 12:30–15:00 | Q&A |
+
+## Slide-by-slide script
+
+### Slide 1 — Hook
+
+Use one sentence:
+
+> "A competitor can run from 12 Meta pages. A naive search often returns only one.  
+> This is not a data-access problem. It is a reconstruction problem."
+
+### Slide 2 — Problem
+
+- Competitor ecosystems are multi-page: brand-owned, agency-managed, persona-style, and parallel creative testing structures.
+- Meta API limitations are practical, not theoretical: partial fields, inconsistent impressions, pagination overhead, rate limits.
+- Therefore, value cannot come from "API wrapper + dashboard"; value must come from the discovery layer.
+
+Reference: `ARCHITECTURE.md` §1 and §8.
+
+### Slide 3 — Solution shape
+
+Walk through container diagram quickly:
+
+1. Retrieval from Meta API.
+2. Discovery aggregation with explicit confidence.
+3. Ranking and grounded AI analysis.
+4. Deterministic Markdown export from persisted snapshot.
+
+Reference: `ARCHITECTURE.md` §2 and §5.
+
+### Slide 4 — Concept walkthrough (no mockup)
+
+Use the ASCII wireframes:
+
+- Search screen (`/`)
+- Dashboard (`/research/{id}`)
+- Expanded advertiser card
+
+Then narrate the persona-grid synthetic case:
+
+- Why those pages were linked.
+- Why confidence crossed 0.70 for strong links.
+- Why this would be missed by brand-name-only search.
+
+Reference: `ARCHITECTURE.md` §9 and §6.5 (Case 2).
+
+### Slide 5 — Architecture and trade-offs
+
+Talk in this order:
+
+1. Why FastAPI (async fan-out + Pydantic contract).
+2. Why React + Vite (no SSR requirement).
+3. Why SQLite in v1 and exact migration gate to Postgres in v2.
+4. Why mock-first and protocol-driven interfaces reduce delivery risk.
+
+Reference: `ARCHITECTURE.md` §3.
+
+### Slide 6 — Discovery deep-dive
+
+Explain:
+
+- Signal table and weights.
+- Confidence formula.
+- Threshold design (`>=0.45` membership, `>=0.70` strong link).
+
+Use two examples:
+
+- Case 2 (true positive, persona network).
+- Case 5 (false-positive rejection via affiliate overlap).
+
+Reference: `ARCHITECTURE.md` §6.2–§6.5.
+
+### Slide 7 — AI grounding
+
+Show bad vs good answer:
+
+- Bad: generic marketing adjectives.
+- Good: direct quote + metric-grounded reasoning.
+
+Then explain enforcement path:
+
+- Prompt constraints.
+- Regex post-validation.
+- One retry.
+- Weak-quality flag if still generic.
+
+Reference: `ARCHITECTURE.md` §7.
+
+### Slide 8 — Roadmap and gates
+
+Explain:
+
+- v1 (~2 weeks): mock-first end-to-end.
+- v2 (~3–4 weeks): real APIs, queue, observability, calibration.
+- Gate is metrics and prerequisites, not calendar date.
+
+Important synced cost line:
+
+- v2 target: `<= $3.50/run` standard pricing, or `<= $1.75/run` with batch API.
+
+Reference: `ROADMAP.md` and `ARCHITECTURE.md` §12.3.
+
+### Slide 9 — Q&A
+
+Keep answers short, evidence-based, and section-referenced.
+
+## Likely questions and concise answers
+
+### "Why not just use existing ad intelligence tools?"
+
+They surface ads; this proposal reconstructs advertiser ecosystems through explicit link signals and confidence scoring.
+Core differentiation is discovery logic, not data retrieval UI.
+
+### "Where do your weights come from?"
+
+They are expert priors for v1.
+v2 includes calibration against labeled ground truth and keeps old priors unless calibration improves recall without worsening false-link rate.
+
+### "How do you prevent AI fluff?"
+
+Grounding rules + forbidden-vocabulary checks + one retry + weak-quality flag.
+Success is measured by grounding pass rate and citation density.
+
+### "What if Meta data is incomplete?"
+
+Optional fields, partial-data tolerance, confidence from multiple signals, and visible `[partial]` markers in output.
+
+### "How expensive is this at scale?"
+
+For the defined benchmark run:
+- Standard: around `$3.45` worst-case (`<= $3.50` target).
+- Batch: around `$1.75` (`<= $1.75` target).
+
+### "What is intentionally not included?"
+
+Multi-platform integrations, OCR/visual hashing, RBAC workspaces, and rich export integrations are explicitly off-scope for v1/v2.
+
+## Personal checklist before presenting
+
+- Re-read `ARCHITECTURE.md` §6, §7, §12 and `ROADMAP.md` v1/v2 gates.
+- Be able to write confidence formula from memory.
+- Be ready to walk Case 2 and Case 5 without slides.
+- Keep tone engineering-first, avoid business KPI promises.
+- If challenged, point to assumptions and gates rather than improvising commitments.
+# PITCH.md
+
 Outline for the 10–15 minute oral defense of the architectural proposal. Audience: a technical interviewer evaluating a take-home assignment. Tone: engineering, no marketing.
 
 This document is the **narrative spine**. It does not duplicate technical content — it points into [ARCHITECTURE.md](./ARCHITECTURE.md) and [ROADMAP.md](./ROADMAP.md) and tells the speaker which slide is on screen at each moment.
